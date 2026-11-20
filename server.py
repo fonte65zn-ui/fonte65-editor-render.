@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import textwrap
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,17 +16,19 @@ TOKEN = os.environ.get("F65_RENDER_TOKEN", "")
 BUSY = threading.BoundedSemaphore(1)
 STRIPE = Path(__file__).resolve().with_name("faixa.png")
 FILTER = (
-    "[0:v:0]setpts=PTS-STARTPTS,scale=w='min(iw,1080)':h='min(ih,1920)':"
-    "force_original_aspect_ratio=decrease:force_divisible_by=2[video];"
+    "[0:v:0]setpts=PTS-STARTPTS,fps=25,scale=w='min(iw,540)':h='min(ih,960)':"
+    "force_original_aspect_ratio=decrease:force_divisible_by=2:flags=fast_bilinear[video];"
     "[1:v]crop=49:800:10:19,format=rgba,"
     "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':"
     "a='if((lt(Y,18)+gte(Y,H-18))*lt(X,20)*gt(g(X,Y),180),0,255)'[rail];"
     "[rail][video]scale2ref=w=trunc(iw/10):h=ih[brand][base];"
-    "[base][brand]overlay=0:0:format=auto,drawtext="
+    "[base][brand]overlay=0:0:format=auto,split[playing][cover];"
+    "[cover]trim=end_frame=1[still];"
+    "[playing][still]overlay=eof_action=repeat:repeatlast=1:enable='lt(t,1)',drawtext="
     "fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:"
     "textfile=title.txt:expansion=none:fontcolor=white:fontsize=min(w/36\\,h/32):"
     "line_spacing=6:box=1:boxcolor=black@0.78:boxborderw=8:"
-    "x=w*0.15:y=max(h*0.53\\,h*0.82-th):enable='lt(t,2)'[reel]"
+    "x=(w-tw)/2:y=(h-th)/2:enable='lt(t,1)'[reel]"
 )
 
 
@@ -80,14 +83,16 @@ class Handler(BaseHTTPRequestHandler):
                             return
                         output.write(chunk)
                         size -= len(chunk)
+                started = time.monotonic()
                 result = subprocess.run([
                     "ffmpeg", "-nostdin", "-v", "error", "-max_alloc", "134217728",
                     "-protocol_whitelist", "file", "-f", "mov", "-threads", "2", "-i", "input.mp4",
                     "-i", str(STRIPE), "-filter_complex_threads", "1", "-filter_complex", FILTER,
                     "-map", "[reel]", "-map", "0:a:0?", "-c:v", "libx264", "-threads", "2",
-                    "-preset", "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                    "-preset", "ultrafast", "-crf", "24", "-maxrate", "2400k", "-bufsize", "4800k", "-pix_fmt", "yuv420p", "-c:a", "aac",
                     "-movflags", "+faststart", "-fs", str(LIMIT), "output.mp4",
                 ], cwd=root, timeout=150, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self.log_message("FFmpeg: %.1fs, exit=%d", time.monotonic() - started, result.returncode)
                 output = root / "output.mp4"
                 if result.returncode or not output.is_file() or not 0 < output.stat().st_size < LIMIT:
                     self.send_error(422)
